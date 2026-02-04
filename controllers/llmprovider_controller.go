@@ -49,6 +49,8 @@ type LLMProviderReconciler struct {
 // +kubebuilder:rbac:groups=proxy.livellm.ai,resources=llmproviders/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=proxy.livellm.ai,resources=llmproviders/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
