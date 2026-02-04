@@ -38,8 +38,7 @@ import (
 )
 
 const (
-	llmProviderFinalizer           = "llmprovider.proxy.livellm.ai/finalizer"
-	lastSyncedGenerationAnnotation = "proxy.livellm.ai/last-synced-generation"
+	llmProviderFinalizer = "llmprovider.proxy.livellm.ai/finalizer"
 )
 
 type ProxyConfig struct {
@@ -107,10 +106,9 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Determine if we need to register/update
 	shouldRegister := false
-	currentGen := strconv.FormatInt(llmProvider.Generation, 10)
-
-	// 1. Check if Spec has changed
-	if llmProvider.Annotations == nil || llmProvider.Annotations[lastSyncedGenerationAnnotation] != currentGen {
+	
+	// 1. Check if Spec has changed by comparing Generation with Status.LastSyncedGeneration
+	if llmProvider.Generation != llmProvider.Status.LastSyncedGeneration {
 		shouldRegister = true
 	}
 
@@ -133,6 +131,12 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		err = r.registerProvider(ctx, llmProvider)
 		if err != nil {
 			log.Error(err, "Failed to register provider")
+			
+			// Refresh object before status update in case of conflict
+			if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
+				return ctrl.Result{}, err
+			}
+			
 			llmProvider.Status.Registered = false
 			llmProvider.Status.Message = err.Error()
 			if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
@@ -146,29 +150,29 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 
-		// Refresh the object before updating annotations to avoid conflict
+		// Refresh the object before updating status
 		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
 			return ctrl.Result{}, err
 		}
 
-		// Update Annotation to track sync state
-		if llmProvider.Annotations == nil {
-			llmProvider.Annotations = make(map[string]string)
-		}
-		llmProvider.Annotations[lastSyncedGenerationAnnotation] = currentGen
-		if err := r.Update(ctx, llmProvider); err != nil {
+		// Update Status to track sync state
+		llmProvider.Status.LastSyncedGeneration = llmProvider.Generation
+		llmProvider.Status.Registered = true
+		llmProvider.Status.Message = "Successfully registered"
+		
+		if err := r.Status().Update(ctx, llmProvider); err != nil {
 			if errors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, err
 		}
-	}
-
-	if !llmProvider.Status.Registered {
-		// Refresh object again before status update
+	} else if !llmProvider.Status.Registered {
+		// If we skipped registration (because it exists) but status says unregistered
+		// Refresh object first
 		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
 			return ctrl.Result{}, err
 		}
+
 		llmProvider.Status.Registered = true
 		llmProvider.Status.Message = "Successfully registered"
 		if err := r.Status().Update(ctx, llmProvider); err != nil {

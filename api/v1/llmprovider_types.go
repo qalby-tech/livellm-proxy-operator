@@ -56,6 +56,8 @@ type LLMProviderStatus struct {
 	Registered bool `json:"registered"`
 	// Message contains any error or status message
 	Message string `json:"message,omitempty"`
+	// LastSyncedGeneration is the generation of the object that was last successfully synced
+	LastSyncedGeneration int64 `json:"lastSyncedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

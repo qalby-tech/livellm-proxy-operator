@@ -71,6 +71,10 @@ spec:
               message:
                 description: Message contains any error or status message
                 type: string
+              lastSyncedGeneration:
+                description: LastSyncedGeneration is the generation of the object that was last successfully synced
+                format: int64
+                type: integer
               registered:
                 description: Registered indicates if the provider is successfully
                   registered with the proxy
