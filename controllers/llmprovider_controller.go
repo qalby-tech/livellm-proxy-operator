@@ -243,6 +243,19 @@ func (r *LLMProviderReconciler) registerProvider(ctx context.Context, provider *
 	// Use namespace-name as UID to avoid collisions
 	uid := fmt.Sprintf("%s-%s", provider.Namespace, provider.Name)
 
+	// 1. First, attempt to delete existing config to ensure clean state (replace)
+	deleteUrl := fmt.Sprintf("%s/livellm/providers/config/%s", r.ProxyURL, uid)
+	delReq, err := http.NewRequestWithContext(ctx, "DELETE", deleteUrl, nil)
+	if err == nil {
+		client := &http.Client{Timeout: 5 * time.Second}
+		delResp, err := client.Do(delReq)
+		if err == nil {
+			defer delResp.Body.Close()
+			// We ignore errors here as the provider might not exist yet
+		}
+	}
+
+	// 2. Create new config
 	payload := map[string]interface{}{
 		"uid":      uid,
 		"provider": provider.Spec.Provider,
