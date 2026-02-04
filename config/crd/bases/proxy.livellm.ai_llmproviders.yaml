@@ -58,6 +58,9 @@ spec:
               provider:
                 description: Provider type (e.g., openai, google, anthropic)
                 type: string
+              refreshInterval:
+                description: 'RefreshInterval specifies how often to reconcile the provider status Default: 5m'
+                type: string
             required:
             - apiKeyRef
             - provider

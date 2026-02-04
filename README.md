@@ -41,6 +41,8 @@ metadata:
   namespace: default
 spec:
   provider: openai
+  # Optional: Reconcile interval (default: 5m)
+  refreshInterval: "1h"
   apiKeyRef:
     name: openai-secret
     key: api_key

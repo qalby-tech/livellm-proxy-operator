@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,7 +37,14 @@ import (
 	proxyv1 "livellm-proxy-operator/api/v1"
 )
 
-const llmProviderFinalizer = "llmprovider.proxy.livellm.ai/finalizer"
+const (
+	llmProviderFinalizer           = "llmprovider.proxy.livellm.ai/finalizer"
+	lastSyncedGenerationAnnotation = "proxy.livellm.ai/last-synced-generation"
+)
+
+type ProxyConfig struct {
+	UID string `json:"uid"`
+}
 
 // LLMProviderReconciler reconciles a LLMProvider object
 type LLMProviderReconciler struct {
@@ -74,6 +82,7 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if err := r.Update(ctx, llmProvider); err != nil {
 				return ctrl.Result{}, err
 			}
+			return ctrl.Result{}, nil
 		}
 	} else {
 		// The object is being deleted
@@ -96,17 +105,51 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// Logic to register provider
-	err = r.registerProvider(ctx, llmProvider)
-	if err != nil {
-		log.Error(err, "Failed to register provider")
-		llmProvider.Status.Registered = false
-		llmProvider.Status.Message = err.Error()
-		if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
-			return ctrl.Result{}, updateErr
+	// Determine if we need to register/update
+	shouldRegister := false
+	currentGen := strconv.FormatInt(llmProvider.Generation, 10)
+
+	// 1. Check if Spec has changed
+	if llmProvider.Annotations == nil || llmProvider.Annotations[lastSyncedGenerationAnnotation] != currentGen {
+		shouldRegister = true
+	}
+
+	// 2. If Spec hasn't changed, check if it exists in Proxy (Verification)
+	if !shouldRegister {
+		exists, err := r.checkProviderExists(ctx, llmProvider)
+		if err != nil {
+			log.Error(err, "Failed to check provider existence in proxy")
+			// If check fails, we assume we might need to register to be safe,
+			// or we could skip and retry later. Let's try to register.
+			shouldRegister = true
+		} else if !exists {
+			log.Info("Provider missing in proxy, triggering registration")
+			shouldRegister = true
 		}
-		// Requeue with delay to retry
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+	}
+
+	if shouldRegister {
+		// Logic to register provider
+		err = r.registerProvider(ctx, llmProvider)
+		if err != nil {
+			log.Error(err, "Failed to register provider")
+			llmProvider.Status.Registered = false
+			llmProvider.Status.Message = err.Error()
+			if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
+			// Requeue with delay to retry
+			return ctrl.Result{RequeueAfter: time.Minute}, err
+		}
+
+		// Update Annotation to track sync state
+		if llmProvider.Annotations == nil {
+			llmProvider.Annotations = make(map[string]string)
+		}
+		llmProvider.Annotations[lastSyncedGenerationAnnotation] = currentGen
+		if err := r.Update(ctx, llmProvider); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if !llmProvider.Status.Registered {
@@ -117,7 +160,50 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	return ctrl.Result{}, nil
+	// Periodic reconciliation
+	reconcileInterval := 5 * time.Minute
+	if llmProvider.Spec.RefreshInterval != "" {
+		if d, err := time.ParseDuration(llmProvider.Spec.RefreshInterval); err == nil {
+			reconcileInterval = d
+		} else {
+			log.Error(err, "Invalid refreshInterval format, using default 5m")
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+}
+
+func (r *LLMProviderReconciler) checkProviderExists(ctx context.Context, provider *proxyv1.LLMProvider) (bool, error) {
+	url := fmt.Sprintf("%s/livellm/providers/configs", r.ProxyURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("proxy returned status %d", resp.StatusCode)
+	}
+
+	var configs []ProxyConfig
+	if err := json.NewDecoder(resp.Body).Decode(&configs); err != nil {
+		return false, err
+	}
+
+	targetUID := fmt.Sprintf("%s-%s", provider.Namespace, provider.Name)
+	for _, config := range configs {
+		if config.UID == targetUID {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (r *LLMProviderReconciler) registerProvider(ctx context.Context, provider *proxyv1.LLMProvider) error {

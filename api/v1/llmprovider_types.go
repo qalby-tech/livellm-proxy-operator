@@ -43,6 +43,11 @@ type LLMProviderSpec struct {
 
 	// APIKeyRef references a Secret containing the API key
 	APIKeyRef SecretKeySelector `json:"apiKeyRef"`
+
+	// RefreshInterval specifies how often to reconcile the provider status
+	// Default: 5m
+	// +optional
+	RefreshInterval string `json:"refreshInterval,omitempty"`
 }
 
 // LLMProviderStatus defines the observed state of LLMProvider
