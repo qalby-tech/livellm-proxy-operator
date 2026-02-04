@@ -136,10 +136,19 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			llmProvider.Status.Registered = false
 			llmProvider.Status.Message = err.Error()
 			if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
+				// Conflict errors are normal if object was modified concurrently
+				if errors.IsConflict(updateErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, updateErr
 			}
 			// Requeue with delay to retry
 			return ctrl.Result{RequeueAfter: time.Minute}, err
+		}
+
+		// Refresh the object before updating annotations to avoid conflict
+		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		// Update Annotation to track sync state
@@ -148,14 +157,24 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		llmProvider.Annotations[lastSyncedGenerationAnnotation] = currentGen
 		if err := r.Update(ctx, llmProvider); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
 
 	if !llmProvider.Status.Registered {
+		// Refresh object again before status update
+		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
+			return ctrl.Result{}, err
+		}
 		llmProvider.Status.Registered = true
 		llmProvider.Status.Message = "Successfully registered"
 		if err := r.Status().Update(ctx, llmProvider); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
