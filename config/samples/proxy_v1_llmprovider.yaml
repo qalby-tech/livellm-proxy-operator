@@ -1,0 +1,20 @@
+apiVersion: proxy.livellm.ai/v1
+kind: LLMProvider
+metadata:
+  name: openai-provider
+  namespace: default
+spec:
+  provider: openai
+  apiKeyRef:
+    name: openai-secret
+    key: api-key
+  blacklistModels:
+    - gpt-3.5-turbo-0301
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: default
+stringData:
+  api-key: sk-xxxxxxxxxxxxxxxxxxxxxxxx
