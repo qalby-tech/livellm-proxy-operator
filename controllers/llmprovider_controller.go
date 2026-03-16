@@ -314,8 +314,8 @@ func (r *LLMProviderReconciler) deleteExternalResources(ctx context.Context, pro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 404 {
-		// Already deleted
+	if resp.StatusCode == 404 || resp.StatusCode == 400 {
+		// Already deleted or not found
 		return nil
 	}
 
