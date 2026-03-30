@@ -17,13 +17,13 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
+	"github.com/fernet/fernet-go"
+	goredis "github.com/redis/go-redis/v9"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,18 +37,17 @@ import (
 )
 
 const (
-	llmProviderFinalizer = "llmprovider.proxy.livellm.ai/finalizer"
+	llmProviderFinalizer  = "llmprovider.proxy.livellm.ai/finalizer"
+	redisProvidersKey     = "livellm:providers"
+	redisProvidersChannel = "livellm:providers:events"
 )
-
-type ProxyConfig struct {
-	UID string `json:"uid"`
-}
 
 // LLMProviderReconciler reconciles a LLMProvider object
 type LLMProviderReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	ProxyURL string
+	Scheme        *runtime.Scheme
+	RedisClient   *goredis.Client
+	EncryptionKey *fernet.Key // nil when ENCRYPTION_SALT is not configured
 }
 
 // +kubebuilder:rbac:groups=proxy.livellm.ai,resources=llmproviders,verbs=get;list;watch;create;update;patch;delete
@@ -70,169 +69,116 @@ func (r *LLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Examine DeletionTimestamp to determine if object is under deletion
-	if llmProvider.ObjectMeta.DeletionTimestamp.IsZero() {
-		// The object is not being deleted, so if it does not have our finalizer,
-		// then lets add the finalizer and update the object. This is equivalent
-		// to registering our finalizer.
-		if !controllerutil.ContainsFinalizer(llmProvider, llmProviderFinalizer) {
-			controllerutil.AddFinalizer(llmProvider, llmProviderFinalizer)
-			if err := r.Update(ctx, llmProvider); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		}
-	} else {
-		// The object is being deleted
+	// Handle deletion via finalizer
+	if !llmProvider.ObjectMeta.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(llmProvider, llmProviderFinalizer) {
-			// our finalizer is present, so lets handle any external dependency
-			if err := r.deleteExternalResources(ctx, llmProvider); err != nil {
-				// if fail to delete the external dependency here, return with error
-				// so that it can be retried
+			uid := fmt.Sprintf("%s-%s", llmProvider.Namespace, llmProvider.Name)
+			if err := r.deleteFromRedis(ctx, uid); err != nil {
 				return ctrl.Result{}, err
 			}
-
-			// remove our finalizer from the list and update it.
 			controllerutil.RemoveFinalizer(llmProvider, llmProviderFinalizer)
 			if err := r.Update(ctx, llmProvider); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
-
-		// Stop reconciliation as the item is being deleted
 		return ctrl.Result{}, nil
 	}
 
-	// Determine if we need to register/update
+	// Ensure finalizer is present
+	if !controllerutil.ContainsFinalizer(llmProvider, llmProviderFinalizer) {
+		controllerutil.AddFinalizer(llmProvider, llmProviderFinalizer)
+		if err := r.Update(ctx, llmProvider); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	uid := fmt.Sprintf("%s-%s", llmProvider.Namespace, llmProvider.Name)
+
+	// Decide whether we need to write to Redis
 	shouldRegister := false
-	
-	// 1. Check if Spec has changed by comparing Generation with Status.LastSyncedGeneration
 	if llmProvider.Generation != llmProvider.Status.LastSyncedGeneration {
 		shouldRegister = true
 	}
 
-	// 2. If Spec hasn't changed, check if it exists in Proxy (Verification)
 	if !shouldRegister {
-		exists, err := r.checkProviderExists(ctx, llmProvider)
+		exists, err := r.RedisClient.HExists(ctx, redisProvidersKey, uid).Result()
 		if err != nil {
-			log.Error(err, "Failed to check provider existence in proxy")
-			// If check fails, we assume we might need to register to be safe,
-			// or we could skip and retry later. Let's try to register.
+			log.Error(err, "Failed to check provider existence in Redis")
 			shouldRegister = true
 		} else if !exists {
-			log.Info("Provider missing in proxy, triggering registration")
+			log.Info("Provider missing in Redis, triggering registration", "uid", uid)
 			shouldRegister = true
 		}
 	}
 
 	if shouldRegister {
-		// Logic to register provider
-		err = r.registerProvider(ctx, llmProvider)
-		if err != nil {
-			log.Error(err, "Failed to register provider")
-			
-			// Refresh object before status update in case of conflict
-			if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
-				return ctrl.Result{}, err
+		if err := r.registerToRedis(ctx, llmProvider, uid); err != nil {
+			log.Error(err, "Failed to register provider to Redis")
+
+			if refreshErr := r.Get(ctx, req.NamespacedName, llmProvider); refreshErr != nil {
+				return ctrl.Result{}, refreshErr
 			}
-			
 			llmProvider.Status.Registered = false
 			llmProvider.Status.Message = err.Error()
 			if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
-				// Conflict errors are normal if object was modified concurrently
 				if errors.IsConflict(updateErr) {
 					return ctrl.Result{Requeue: true}, nil
 				}
 				return ctrl.Result{}, updateErr
 			}
-			// Requeue with delay to retry
 			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 
-		// Refresh the object before updating status
-		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
-			return ctrl.Result{}, err
+		if refreshErr := r.Get(ctx, req.NamespacedName, llmProvider); refreshErr != nil {
+			return ctrl.Result{}, refreshErr
 		}
-
-		// Update Status to track sync state
 		llmProvider.Status.LastSyncedGeneration = llmProvider.Generation
 		llmProvider.Status.Registered = true
 		llmProvider.Status.Message = "Successfully registered"
-		
-		if err := r.Status().Update(ctx, llmProvider); err != nil {
-			if errors.IsConflict(err) {
+		if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
+			if errors.IsConflict(updateErr) {
 				return ctrl.Result{Requeue: true}, nil
 			}
-			return ctrl.Result{}, err
+			return ctrl.Result{}, updateErr
 		}
 	} else if !llmProvider.Status.Registered {
-		// If we skipped registration (because it exists) but status says unregistered
-		// Refresh object first
-		if err := r.Get(ctx, req.NamespacedName, llmProvider); err != nil {
-			return ctrl.Result{}, err
+		if refreshErr := r.Get(ctx, req.NamespacedName, llmProvider); refreshErr != nil {
+			return ctrl.Result{}, refreshErr
 		}
-
 		llmProvider.Status.Registered = true
 		llmProvider.Status.Message = "Successfully registered"
-		if err := r.Status().Update(ctx, llmProvider); err != nil {
-			if errors.IsConflict(err) {
+		if updateErr := r.Status().Update(ctx, llmProvider); updateErr != nil {
+			if errors.IsConflict(updateErr) {
 				return ctrl.Result{Requeue: true}, nil
 			}
-			return ctrl.Result{}, err
+			return ctrl.Result{}, updateErr
 		}
 	}
 
-	// Periodic reconciliation
 	reconcileInterval := 5 * time.Minute
 	if llmProvider.Spec.RefreshInterval != "" {
 		if d, err := time.ParseDuration(llmProvider.Spec.RefreshInterval); err == nil {
 			reconcileInterval = d
 		} else {
-			log.Error(err, "Invalid refreshInterval format, using default 5m")
+			log.Error(err, "Invalid refreshInterval, using default 5m")
 		}
 	}
 
 	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 }
 
-func (r *LLMProviderReconciler) checkProviderExists(ctx context.Context, provider *proxyv1.LLMProvider) (bool, error) {
-	url := fmt.Sprintf("%s/livellm/providers/configs", r.ProxyURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false, err
-	}
+// registerToRedis writes an encrypted (or plain) provider JSON blob to the Redis
+// hash and publishes a Pub/Sub event so all proxy replicas hot-reload.
+func (r *LLMProviderReconciler) registerToRedis(ctx context.Context, provider *proxyv1.LLMProvider, uid string) error {
+	log := log.FromContext(ctx)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("proxy returned status %d", resp.StatusCode)
-	}
-
-	var configs []ProxyConfig
-	if err := json.NewDecoder(resp.Body).Decode(&configs); err != nil {
-		return false, err
-	}
-
-	targetUID := fmt.Sprintf("%s-%s", provider.Namespace, provider.Name)
-	for _, config := range configs {
-		if config.UID == targetUID {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func (r *LLMProviderReconciler) registerProvider(ctx context.Context, provider *proxyv1.LLMProvider) error {
-	// Fetch API Key from Secret
+	// Fetch the API key from the referenced K8s Secret
 	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{Name: provider.Spec.APIKeyRef.Name, Namespace: provider.Namespace}, secret)
-	if err != nil {
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      provider.Spec.APIKeyRef.Name,
+		Namespace: provider.Namespace,
+	}, secret); err != nil {
 		return fmt.Errorf("failed to get secret %s: %w", provider.Spec.APIKeyRef.Name, err)
 	}
 
@@ -240,31 +186,13 @@ func (r *LLMProviderReconciler) registerProvider(ctx context.Context, provider *
 	if !ok {
 		return fmt.Errorf("key %s not found in secret %s", provider.Spec.APIKeyRef.Key, provider.Spec.APIKeyRef.Name)
 	}
-	apiKey := string(apiKeyBytes)
 
-	// Construct payload
-	// Use namespace-name as UID to avoid collisions
-	uid := fmt.Sprintf("%s-%s", provider.Namespace, provider.Name)
-
-	// 1. First, attempt to delete existing config to ensure clean state (replace)
-	deleteUrl := fmt.Sprintf("%s/livellm/providers/config/%s", r.ProxyURL, uid)
-	delReq, err := http.NewRequestWithContext(ctx, "DELETE", deleteUrl, nil)
-	if err == nil {
-		client := &http.Client{Timeout: 5 * time.Second}
-		delResp, err := client.Do(delReq)
-		if err == nil {
-			defer delResp.Body.Close()
-			// We ignore errors here as the provider might not exist yet
-		}
-	}
-
-	// 2. Create new config
+	// Build the provider payload — must match the Python Settings model fields
 	payload := map[string]interface{}{
 		"uid":      uid,
 		"provider": provider.Spec.Provider,
-		"api_key":  apiKey,
+		"api_key":  string(apiKeyBytes),
 	}
-
 	if provider.Spec.BaseURL != "" {
 		payload["base_url"] = provider.Spec.BaseURL
 	}
@@ -272,57 +200,52 @@ func (r *LLMProviderReconciler) registerProvider(ctx context.Context, provider *
 		payload["blacklist_models"] = provider.Spec.BlacklistModels
 	}
 
-	jsonPayload, err := json.Marshal(payload)
+	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal provider payload: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/livellm/providers/config", r.ProxyURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("proxy returned status %d", resp.StatusCode)
+	// Optionally encrypt with Fernet (key derivation matches the Python proxy exactly)
+	var data []byte
+	if r.EncryptionKey != nil {
+		token, err := fernet.EncryptAndSign(jsonBytes, r.EncryptionKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt provider data: %w", err)
+		}
+		data = token
+	} else {
+		data = jsonBytes
 	}
 
+	// Persist to the shared Redis hash
+	if err := r.RedisClient.HSet(ctx, redisProvidersKey, uid, data).Err(); err != nil {
+		return fmt.Errorf("failed to write provider to Redis: %w", err)
+	}
+
+	// Notify all proxy replicas via Pub/Sub (non-fatal if it fails)
+	eventMsg, _ := json.Marshal(map[string]string{"action": "upsert", "uid": uid})
+	if err := r.RedisClient.Publish(ctx, redisProvidersChannel, string(eventMsg)).Err(); err != nil {
+		log.Error(err, "Failed to publish upsert event — replicas will sync on next reconcile")
+	}
+
+	log.Info("Provider registered to Redis", "uid", uid, "encrypted", r.EncryptionKey != nil)
 	return nil
 }
 
-func (r *LLMProviderReconciler) deleteExternalResources(ctx context.Context, provider *proxyv1.LLMProvider) error {
-	uid := fmt.Sprintf("%s-%s", provider.Namespace, provider.Name)
-	url := fmt.Sprintf("%s/livellm/providers/config/%s", r.ProxyURL, uid)
+// deleteFromRedis removes the provider from Redis and notifies all proxy replicas.
+func (r *LLMProviderReconciler) deleteFromRedis(ctx context.Context, uid string) error {
+	log := log.FromContext(ctx)
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
-	if err != nil {
-		return err
+	if err := r.RedisClient.HDel(ctx, redisProvidersKey, uid).Err(); err != nil {
+		return fmt.Errorf("failed to delete provider from Redis: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 || resp.StatusCode == 400 {
-		// Already deleted or not found
-		return nil
+	eventMsg, _ := json.Marshal(map[string]string{"action": "delete", "uid": uid})
+	if err := r.RedisClient.Publish(ctx, redisProvidersChannel, string(eventMsg)).Err(); err != nil {
+		log.Error(err, "Failed to publish delete event — replicas will sync on next reconcile")
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("proxy returned status %d", resp.StatusCode)
-	}
-
+	log.Info("Provider deleted from Redis", "uid", uid)
 	return nil
 }
 
