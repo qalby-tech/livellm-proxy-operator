@@ -187,21 +187,21 @@ func (r *LLMProviderReconciler) registerToRedis(ctx context.Context, provider *p
 		return fmt.Errorf("key %s not found in secret %s", provider.Spec.APIKeyRef.Key, provider.Spec.APIKeyRef.Name)
 	}
 
-	// Build the provider payload — must match the Python Settings model fields
+	// Build the provider payload — must match the Python Settings model fields (snake_case)
 	payload := map[string]interface{}{
 		"uid":      uid,
-        "provider": provider.Spec.Provider,
-        "api_key":  string(apiKeyBytes),
-    }
-    if provider.Spec.BaseURL != "" {
-        payload["base_url"] = provider.Spec.BaseURL
-    }
-    if len(provider.Spec.BlacklistModels) > 0 {
-        payload["blacklist_models"] = provider.Spec.BlacklistModels
-    }
-    if len(provider.Spec.ModelConfigs) > 0 {
-        payload["model_configs"] = provider.Spec.ModelConfigs
-    }
+		"provider": provider.Spec.Provider,
+		"api_key":  string(apiKeyBytes),
+	}
+	if provider.Spec.BaseURL != "" {
+		payload["base_url"] = provider.Spec.BaseURL
+	}
+	if len(provider.Spec.BlacklistModels) > 0 {
+		payload["blacklist_models"] = provider.Spec.BlacklistModels
+	}
+	if len(provider.Spec.ModelConfigs) > 0 {
+		payload["model_configs"] = convertModelConfigsToSnakeCase(provider.Spec.ModelConfigs)
+	}
 
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -250,6 +250,31 @@ func (r *LLMProviderReconciler) deleteFromRedis(ctx context.Context, uid string)
 
 	log.Info("Provider deleted from Redis", "uid", uid)
 	return nil
+}
+
+// convertModelConfigsToSnakeCase converts Go struct ModelConfig map to snake_case
+// maps that match the Python Pydantic model field names exactly.
+// CRD YAML uses camelCase (Kubernetes convention), but the Python proxy's
+// Pydantic models expect snake_case JSON keys for nested model_configs.
+func convertModelConfigsToSnakeCase(configs map[string]proxyv1.ModelConfig) map[string]interface{} {
+	result := make(map[string]interface{}, len(configs))
+	for modelName, cfg := range configs {
+		mc := map[string]interface{}{
+			"context_limit":               cfg.ContextLimit,
+			"context_overflow_strategy":   string(cfg.ContextOverflowStrategy),
+		}
+		if cfg.Fallback != nil {
+			mc["fallback"] = map[string]interface{}{
+				"fallback_provider_uid":       cfg.Fallback.FallbackProviderUID,
+				"fallback_model":              cfg.Fallback.FallbackModel,
+				"fallback_strategy":           string(cfg.Fallback.FallbackStrategy),
+				"context_limit":               cfg.Fallback.ContextLimit,
+				"context_overflow_strategy":   string(cfg.Fallback.ContextOverflowStrategy),
+			}
+		}
+		result[modelName] = mc
+	}
+	return result
 }
 
 // SetupWithManager sets up the controller with the Manager.
