@@ -55,11 +55,68 @@ spec:
                 items:
                   type: string
                 type: array
+              modelConfigs:
+                additionalProperties:
+                  description: ModelConfig defines per-model configuration including
+                    fallback and context settings
+                  properties:
+                    contextLimit:
+                      description: Maximum context size in tokens. If <= 0, context
+                        is assumed not to be an issue.
+                      type: integer
+                    contextOverflowStrategy:
+                      default: truncate
+                      description: Strategy for handling context overflow 'truncate'
+                        or 'recycle'
+                      enum:
+                      - truncate
+                      - recycle
+                      type: string
+                    fallback:
+                      description: Fallback configuration for this model
+                      properties:
+                        contextLimit:
+                          description: Maximum context size in tokens for the fallback
+                            model. If <= 0, context is assumed not to be an issue.
+                          type: integer
+                        contextOverflowStrategy:
+                          default: truncate
+                          description: Strategy for handling context overflow on
+                            the fallback model 'truncate' or 'recycle'
+                          enum:
+                          - truncate
+                          - recycle
+                          type: string
+                        fallbackModel:
+                          description: FallbackModel is the model to use on the fallback
+                            provider
+                          type: string
+                        fallbackProviderUid:
+                          description: FallbackProviderUID is the provider UID to
+                            fallback to
+                          type: string
+                        fallbackStrategy:
+                          default: sequential
+                          description: 'Strategy for fallback: ''sequential'' (try
+                            primary then fallback) or ''parallel'' (try both simultaneously)'
+                          enum:
+                          - sequential
+                          - parallel
+                          type: string
+                      required:
+                      - fallbackModel
+                      - fallbackProviderUid
+                      type: object
+                  type: object
+                description: ModelConfigs contains per-model configuration including
+                  fallback and context settings. Key is the model name.
+                type: object
               provider:
                 description: Provider type (e.g., openai, google, anthropic)
                 type: string
               refreshInterval:
-                description: 'RefreshInterval specifies how often to reconcile the provider status Default: 5m'
+                description: 'RefreshInterval specifies how often to reconcile the
+                  provider status Default: 5m'
                 type: string
             required:
             - apiKeyRef
@@ -68,13 +125,14 @@ spec:
           status:
             description: LLMProviderStatus defines the observed state of LLMProvider
             properties:
+              lastSyncedGeneration:
+                description: LastSyncedGeneration is the generation of the object
+                  that was last successfully synced
+                format: int64
+                type: integer
               message:
                 description: Message contains any error or status message
                 type: string
-              lastSyncedGeneration:
-                description: LastSyncedGeneration is the generation of the object that was last successfully synced
-                format: int64
-                type: integer
               registered:
                 description: Registered indicates if the provider is successfully
                   registered with the proxy

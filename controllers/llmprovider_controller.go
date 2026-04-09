@@ -190,15 +190,18 @@ func (r *LLMProviderReconciler) registerToRedis(ctx context.Context, provider *p
 	// Build the provider payload — must match the Python Settings model fields
 	payload := map[string]interface{}{
 		"uid":      uid,
-		"provider": provider.Spec.Provider,
-		"api_key":  string(apiKeyBytes),
-	}
-	if provider.Spec.BaseURL != "" {
-		payload["base_url"] = provider.Spec.BaseURL
-	}
-	if len(provider.Spec.BlacklistModels) > 0 {
-		payload["blacklist_models"] = provider.Spec.BlacklistModels
-	}
+        "provider": provider.Spec.Provider,
+        "api_key":  string(apiKeyBytes),
+    }
+    if provider.Spec.BaseURL != "" {
+        payload["base_url"] = provider.Spec.BaseURL
+    }
+    if len(provider.Spec.BlacklistModels) > 0 {
+        payload["blacklist_models"] = provider.Spec.BlacklistModels
+    }
+    if len(provider.Spec.ModelConfigs) > 0 {
+        payload["model_configs"] = provider.Spec.ModelConfigs
+    }
 
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {

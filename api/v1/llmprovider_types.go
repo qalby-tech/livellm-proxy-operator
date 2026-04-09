@@ -28,6 +28,59 @@ type SecretKeySelector struct {
 	Key string `json:"key"`
 }
 
+// FallbackStrategyType defines the strategy for executing fallbacks
+type FallbackStrategyType string
+
+const (
+	// SequentialStrategy tries primary first, then fallback on failure
+	SequentialStrategy FallbackStrategyType = "sequential"
+	// ParallelStrategy tries primary and fallback simultaneously, takes first success
+	ParallelStrategy FallbackStrategyType = "parallel"
+)
+
+// FallbackConfig defines fallback settings for a specific model
+type FallbackConfig struct {
+	// FallbackProviderUID is the provider UID to fallback to
+	FallbackProviderUID string `json:"fallbackProviderUid"`
+	// FallbackModel is the model to use on the fallback provider
+	FallbackModel string `json:"fallbackModel"`
+	// Strategy for fallback: 'sequential' (try primary then fallback) or 'parallel' (try both simultaneously)
+	// +optional
+	// +kubebuilder:default=sequential
+	FallbackStrategy FallbackStrategyType `json:"fallbackStrategy,omitempty"`
+	// Maximum context size in tokens for the fallback model. If <= 0, context is assumed not to be an issue.
+	// +optional
+	ContextLimit int `json:"contextLimit,omitempty"`
+	// Strategy for handling context overflow on the fallback model: 'truncate' or 'recycle'
+	// +optional
+	// +kubebuilder:default=truncate
+	ContextOverflowStrategy ContextOverflowStrategyType `json:"contextOverflowStrategy,omitempty"`
+}
+
+// ContextOverflowStrategyType defines the strategy for handling context overflow
+type ContextOverflowStrategyType string
+
+const (
+	// TruncateStrategy takes beginning, middle, and end portions
+	TruncateStrategy ContextOverflowStrategyType = "truncate"
+	// RecycleStrategy iteratively processes chunks, merging results
+	RecycleStrategy ContextOverflowStrategyType = "recycle"
+)
+
+// ModelConfig defines per-model configuration including fallback and context settings
+type ModelConfig struct {
+	// Fallback configuration for this model
+	// +optional
+	Fallback *FallbackConfig `json:"fallback,omitempty"`
+	// Maximum context size in tokens. If <= 0, context is assumed not to be an issue.
+	// +optional
+	ContextLimit int `json:"contextLimit,omitempty"`
+	// Strategy for handling context overflow: 'truncate' or 'recycle'
+	// +optional
+	// +kubebuilder:default=truncate
+	ContextOverflowStrategy ContextOverflowStrategyType `json:"contextOverflowStrategy,omitempty"`
+}
+
 // LLMProviderSpec defines the desired state of LLMProvider
 type LLMProviderSpec struct {
 	// Provider type (e.g., openai, google, anthropic)
@@ -48,6 +101,11 @@ type LLMProviderSpec struct {
 	// Default: 5m
 	// +optional
 	RefreshInterval string `json:"refreshInterval,omitempty"`
+
+	// ModelConfigs contains per-model configuration including fallback and context settings
+	// Key is the model name
+	// +optional
+	ModelConfigs map[string]ModelConfig `json:"modelConfigs,omitempty"`
 }
 
 // LLMProviderStatus defines the observed state of LLMProvider
