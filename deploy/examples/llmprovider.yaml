@@ -1,0 +1,43 @@
+apiVersion: proxy.livellm.ai/v1
+kind: LLMProvider
+metadata:
+  name: openai-provider
+  namespace: default
+spec:
+  provider: openai
+  refreshInterval: "5m"
+  apiKeyRef:
+    name: openai-secret
+    key: api-key
+  blacklistModels:
+    - gpt-3.5-turbo-0301
+  modelConfigs:
+    gpt-4o:
+      contextLimit: 128000
+      contextOverflowStrategy: truncate
+      fallback:
+        fallbackProviderUid: default-anthropic-provider
+        fallbackModel: claude-sonnet-4-20250514
+        fallbackStrategy: sequential
+        contextLimit: 200000
+        contextOverflowStrategy: truncate
+    gpt-4o-mini:
+      contextLimit: 128000
+      contextOverflowStrategy: truncate
+      fallback:
+        fallbackProviderUid: default-groq-provider
+        fallbackModel: llama-3.3-70b-versatile
+        fallbackStrategy: parallel
+        contextLimit: 128000
+        contextOverflowStrategy: truncate
+    o3-mini:
+      contextLimit: 200000
+      contextOverflowStrategy: recycle
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: default
+stringData:
+  api-key: sk-xxxxxxxxxxxxxxxxxxxxxxxx

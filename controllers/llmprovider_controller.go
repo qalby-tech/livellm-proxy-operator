@@ -260,16 +260,16 @@ func convertModelConfigsToSnakeCase(configs map[string]proxyv1.ModelConfig) map[
 	result := make(map[string]interface{}, len(configs))
 	for modelName, cfg := range configs {
 		mc := map[string]interface{}{
-			"context_limit":               cfg.ContextLimit,
-			"context_overflow_strategy":   string(cfg.ContextOverflowStrategy),
+			"context_limit":             cfg.ContextLimit,
+			"context_overflow_strategy": string(cfg.ContextOverflowStrategy),
 		}
 		if cfg.Fallback != nil {
 			mc["fallback"] = map[string]interface{}{
-				"fallback_provider_uid":       cfg.Fallback.FallbackProviderUID,
-				"fallback_model":              cfg.Fallback.FallbackModel,
-				"fallback_strategy":           string(cfg.Fallback.FallbackStrategy),
-				"context_limit":               cfg.Fallback.ContextLimit,
-				"context_overflow_strategy":   string(cfg.Fallback.ContextOverflowStrategy),
+				"fallback_provider_uid":     cfg.Fallback.FallbackProviderUID,
+				"fallback_model":            cfg.Fallback.FallbackModel,
+				"fallback_strategy":         string(cfg.Fallback.FallbackStrategy),
+				"context_limit":             cfg.Fallback.ContextLimit,
+				"context_overflow_strategy": string(cfg.Fallback.ContextOverflowStrategy),
 			}
 		}
 		result[modelName] = mc

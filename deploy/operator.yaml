@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livellm-proxy-operator
+  namespace: livellm-system
+  labels:
+    app.kubernetes.io/name: livellm-proxy-operator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: livellm-proxy-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: livellm-proxy-operator
+    spec:
+      serviceAccountName: livellm-proxy-operator
+      containers:
+        - name: operator
+          image: livellm-proxy-operator:latest
+          args:
+            - --leader-elect=false
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            # Uncomment to enable Fernet encryption of provider data in Redis:
+            # - name: ENCRYPTION_SALT
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: encryption-salt
+            #       key: salt
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
